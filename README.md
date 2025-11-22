@@ -41,10 +41,10 @@ python setup_check.py
 
 ```bash
 # Scrape FAQ content from TNG Digital Help Centre
-python scraper.py
+python scrape_tng.py
 ```
 
-This creates `tngd_faqs.json` with all FAQ entries.
+This creates `data/tngd_faqs.json` with all FAQ entries.
 
 ### 3. Use the Interactive Chat
 
@@ -119,10 +119,10 @@ pip install -r requirements.txt
 First, collect FAQ data from TNG Digital Help Centre:
 
 ```bash
-python scraper.py
+python scrape_tng.py
 ```
 
-This will create `tngd_faqs.json` containing all FAQ entries with:
+This will create `data/tngd_faqs.json` containing all FAQ entries with:
 - Question text
 - Answer text
 - URL source
@@ -131,7 +131,7 @@ This will create `tngd_faqs.json` containing all FAQ entries with:
 ### Step 2: Build Knowledge Base
 
 The knowledge base is automatically built when you initialize the RAG system. The system will:
-1. Load FAQs from `tngd_faqs.json`
+1. Load FAQs from `data/tngd_faqs.json`
 2. Chunk documents using the chunking strategy
 3. Generate embeddings
 4. Store in ChromaDB vector database
@@ -255,25 +255,29 @@ result = rag.query("How do I reset my password?")
 - `use_ollama`: Use Ollama instead of transformers (default: False)
 - `ollama_model`: Ollama model name (default: "llama2")
 - `vector_db_path`: Path to ChromaDB storage (default: "./chroma_db")
-- `faq_json_path`: Path to FAQ JSON file (default: "./tngd_faqs.json")
+- `faq_json_path`: Path to FAQ JSON file (default: "./data/tngd_faqs.json")
 
 ## Project Structure
 
 ```
 tng_rag/
 ├── rag_system.py       # Main RAG system implementation
-├── chat.py            # Interactive chat interface
-├── setup_check.py     # Dependency verification
-├── requirements.txt   # Python dependencies
-├── README.md          # This file
-├── tngd_faqs.json     # Scraped FAQ data (generated)
-└── chroma_db/        # Vector database (generated)
+├── rag_config.py       # RAG configuration dataclass
+├── rag_chunker.py      # Document chunking logic
+├── rag_guardrails.py   # Guardrails against adversarial prompts
+├── chat.py             # Interactive chat interface
+├── scrape_tng.py       # Scraper to build FAQ JSON
+├── setup_check.py      # Dependency verification
+├── requirements.txt    # Python dependencies
+├── README.md           # This file
+├── data/               # Scraped FAQ data (e.g. tngd_faqs.json)
+└── chroma_db/          # Vector database (generated)
 ```
 
 ## Components
 
 ### 1. Document Loading & Parsing
-- **scraper.py**: Scrapes FAQ content from TNG Digital Help Centre
+- **scrape_tng.py**: Scrapes FAQ content from TNG Digital Help Centre
 - Extracts: question, answer, URL, category
 - Saves to JSON format
 

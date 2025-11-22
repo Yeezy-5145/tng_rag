@@ -50,7 +50,7 @@ def main():
         print("✅ All required dependencies are installed!")
         print("\nNext steps:")
         print("1. Run: python scraper.py (to collect FAQ data)")
-        print("2. Run: python demo.py (to test the system)")
+        print("2. Run: python chat.py (to test the system)")
     else:
         print("❌ Some dependencies are missing!")
         print("Please run: pip install -r requirements.txt")
