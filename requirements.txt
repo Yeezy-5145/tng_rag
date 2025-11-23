@@ -4,7 +4,7 @@ sentence-transformers>=2.2.0
 transformers>=4.30.0
 torch>=2.0.0
 accelerate>=0.20.0  # Required for device_map="auto" GPU loading
-sentencepiece>=0.1.99  # Required for Mistral tokenizer
+sentencepiece>=0.1.99  # Required for Llama tokenizer
 # Use specific numpy version with pre-built wheels for Windows
 # If you encounter build errors, try: pip install numpy==1.26.4 --only-binary :all:
 numpy>=1.24.0,<2.0.0
@@ -16,7 +16,4 @@ lxml>=4.9.0
 
 # Utilities
 tqdm>=4.65.0
-
-# Groq API
-groq>=0.4.0
 
