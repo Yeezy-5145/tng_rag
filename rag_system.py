@@ -661,7 +661,7 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
         query_lower = query.lower()
         intent = self._detect_question_intent(query)
         
-        # Boilerplate patterns to exclude (but keep Product Disclosure Sheet references)
+        # Boilerplate patterns to exclude
         boilerplate_patterns = [
             r"Below are related articles.*",
             r"Below are related articles that might be useful.*",
