@@ -17,3 +17,6 @@ lxml>=4.9.0
 # Utilities
 tqdm>=4.65.0
 
+# Groq API
+groq>=0.4.0
+

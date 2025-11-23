@@ -21,6 +21,22 @@ from rag_chunker import DocumentChunker
 from rag_guardrails import AdversarialGuardrails
 
 
+def _load_env_file(env_path: str = "env") -> Dict[str, str]:
+    """Load environment variables from env file"""
+    env_vars = {}
+    if os.path.exists(env_path):
+        with open(env_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, value = line.split('=', 1)
+                    key = key.strip()
+                    value = value.strip().strip("'\"")
+                    if key and value:
+                        env_vars[key] = value
+    return env_vars
+
+
 class RAGSystem:
     """Main RAG system class"""
 
@@ -56,78 +72,106 @@ class RAGSystem:
         self.llm = None
         self.tokenizer = None
         self.device_map = None  # Track if using device_map="auto"
+        self.groq_client = None
+        self.use_groq = config.use_groq
         self._init_llm()
 
     def _init_llm(self):
         """Initialize LLM for generation"""
-        print("Loading LLM model (this may take a while)...")
-        try:
-            # Try to load with fast tokenizer first, fall back to slow if sentencepiece not available
+        if self.use_groq:
+            print("Initializing Groq API client...")
             try:
-                self.tokenizer = AutoTokenizer.from_pretrained(self.config.llm_model)
-            except ValueError as e:
-                if "sentencepiece" in str(e).lower():
-                    print("⚠ Warning: Fast tokenizer requires sentencepiece. Using slow tokenizer instead.")
-                    print("   Install sentencepiece with: pip install sentencepiece")
-                    self.tokenizer = AutoTokenizer.from_pretrained(self.config.llm_model, use_fast=False)
-                else:
-                    raise
-            
-            # Set pad token if not present (required for some models)
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-            
-            # Configure model loading for GPU
-            if self.device == "cuda":
+                from groq import Groq
+                
+                # Get API key from config or env file
+                api_key = self.config.groq_api_key
+                if not api_key:
+                    env_vars = _load_env_file()
+                    api_key = env_vars.get('GROQ_API')
+                
+                if not api_key:
+                    raise ValueError("Groq API key not found. Please set it in the 'env' file as GROQ_API=your_key or pass it via config.groq_api_key")
+                
+                self.groq_client = Groq(api_key=api_key)
+                print("✓ Groq API client initialized successfully")
+                self.groq_model = "llama-3.1-8b-instant"                
+                print(f"✓ Using Groq model: {self.groq_model}")
+            except ImportError:
+                raise ImportError("groq package not installed. Install it with: pip install groq")
+            except Exception as e:
+                print(f"✗ ERROR: Failed to initialize Groq client: {e}")
+                import traceback
+                traceback.print_exc()
+                raise
+        else:
+            print("Loading LLM model (this may take a while)...")
+            try:
+                # Try to load with fast tokenizer first, fall back to slow if sentencepiece not available
                 try:
-                    self.llm = AutoModelForCausalLM.from_pretrained(
-                        self.config.llm_model,
-                        dtype=torch.float16,  # Use float16 for GPU to save memory (fixed deprecation)
-                        device_map="auto",  # Automatically distribute across GPUs
-                    )
-                    self.device_map = "auto"  # Track that we're using device_map
-                    print("✓ LLM model loaded on GPU")
-                except Exception as e:
-                    print(f"⚠ Warning: Failed to load LLM on GPU: {e}")
-                    print("Falling back to CPU...")
+                    self.tokenizer = AutoTokenizer.from_pretrained(self.config.llm_model)
+                except ValueError as e:
+                    if "sentencepiece" in str(e).lower():
+                        print("⚠ Warning: Fast tokenizer requires sentencepiece. Using slow tokenizer instead.")
+                        print("   Install sentencepiece with: pip install sentencepiece")
+                        self.tokenizer = AutoTokenizer.from_pretrained(self.config.llm_model, use_fast=False)
+                    else:
+                        raise
+                
+                # Set pad token if not present (required for some models)
+                if self.tokenizer.pad_token is None:
+                    self.tokenizer.pad_token = self.tokenizer.eos_token
+                
+                # Configure model loading for GPU
+                if self.device == "cuda":
+                    try:
+                        self.llm = AutoModelForCausalLM.from_pretrained(
+                            self.config.llm_model,
+                            dtype=torch.float16,  # Use float16 for GPU to save memory (fixed deprecation)
+                            device_map="auto",  # Automatically distribute across GPUs
+                        )
+                        self.device_map = "auto"  # Track that we're using device_map
+                        print("✓ LLM model loaded on GPU")
+                    except Exception as e:
+                        print(f"⚠ Warning: Failed to load LLM on GPU: {e}")
+                        print("Falling back to CPU...")
+                        self.llm = AutoModelForCausalLM.from_pretrained(
+                            self.config.llm_model,
+                            dtype=torch.float32,
+                            device_map=None,
+                        )
+                        self.device_map = None
+                        self.llm = self.llm.to("cpu")
+                        self.device = "cpu"  # Update device to reflect actual usage
+                        print("✓ LLM model loaded on CPU (fallback)")
+                else:
                     self.llm = AutoModelForCausalLM.from_pretrained(
                         self.config.llm_model,
                         dtype=torch.float32,
                         device_map=None,
                     )
-                    self.device_map = None
-                    self.llm = self.llm.to("cpu")
-                    self.device = "cpu"  # Update device to reflect actual usage
-                    print("✓ LLM model loaded on CPU (fallback)")
-            else:
-                self.llm = AutoModelForCausalLM.from_pretrained(
-                    self.config.llm_model,
-                    dtype=torch.float32,
-                    device_map=None,
-                )
-                self.device_map = None  # Not using device_map
-                # Explicitly move to CPU if not using device_map
-                self.llm = self.llm.to(self.device)
-                print("✓ LLM model loaded on CPU")
-            
-            # Verify model is loaded
-            if self.llm is None:
-                raise RuntimeError("LLM model failed to initialize")
-            
-            # Check which device the model is actually on
-            if hasattr(self.llm, 'device'):
-                actual_device = next(self.llm.parameters()).device
-                print(f"✓ LLM model verified on device: {actual_device}")
-            elif self.device_map == "auto":
-                print("✓ LLM model using device_map='auto' (distributed across available devices)")
-            
-            print("✓ LLM model loaded successfully")
-        except Exception as e:
-            print(f"✗ ERROR: Failed to load LLM model: {e}")
-            print(f"Error type: {type(e).__name__}")
-            import traceback
-            traceback.print_exc()
-            raise
+                    self.device_map = None  # Not using device_map
+                    # Explicitly move to CPU if not using device_map
+                    self.llm = self.llm.to(self.device)
+                    print("✓ LLM model loaded on CPU")
+                
+                # Verify model is loaded
+                if self.llm is None:
+                    raise RuntimeError("LLM model failed to initialize")
+                
+                # Check which device the model is actually on
+                if hasattr(self.llm, 'device'):
+                    actual_device = next(self.llm.parameters()).device
+                    print(f"✓ LLM model verified on device: {actual_device}")
+                elif self.device_map == "auto":
+                    print("✓ LLM model using device_map='auto' (distributed across available devices)")
+                
+                print("✓ LLM model loaded successfully")
+            except Exception as e:
+                print(f"✗ ERROR: Failed to load LLM model: {e}")
+                print(f"Error type: {type(e).__name__}")
+                import traceback
+                traceback.print_exc()
+                raise
 
     def _call_llm(
         self,
@@ -140,6 +184,29 @@ class RAGSystem:
         Central helper for all LLM generation calls.
         Ensures consistent tokenization, truncation, and decoding.
         """
+        if self.use_groq and self.groq_client:
+            # Use Groq API
+            try:
+                # Format as chat messages for Groq API
+                messages = [{"role": "user", "content": prompt}]
+                
+                # Call Groq API
+                response = self.groq_client.chat.completions.create(
+                    model=self.groq_model,
+                    messages=messages,
+                    temperature=temperature if do_sample else 0.0,
+                    max_tokens=max_new_tokens,
+                    top_p=0.95 if do_sample else 1.0,
+                )
+                
+                # Extract response text
+                response_text = response.choices[0].message.content.strip()
+                return response_text
+            except Exception as e:
+                print(f"⚠ Warning: Groq API call failed: {e}")
+                raise
+        
+        # Use local model (original implementation)
         # Check if tokenizer has a chat template (for instruction-tuned models like LLaMA 3.1)
         # If it does, format the prompt using the chat template
         if hasattr(self.tokenizer, 'apply_chat_template') and self.tokenizer.chat_template is not None:
@@ -791,9 +858,9 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
             # Debug logging should never break main flow
             pass
 
-        # Persona prompt: single-chunk, strictly context-bound, formal tone
+# Persona prompt: single-chunk, strictly context-bound, formal tone
         persona_prompt = f"""
-You are a professional customer support representative for TNG Digital. Provide an accurate, factual response based ONLY on the information in the context below.
+        You are a professional customer support representative for TNG Digital. Provide an accurate, factual response based ONLY on the information in the context below.
 
 CRITICAL RULES (FOLLOW EXACTLY):
 1. Use ONLY information explicitly stated in the context. Do NOT add, invent, assume, or speculate.
@@ -804,7 +871,21 @@ CRITICAL RULES (FOLLOW EXACTLY):
    - Remove punctuation (e.g., "Sdn. Bhd." must stay as "Sdn. Bhd.", not "Sdn Bhd")
    - Add spaces in acronyms (e.g., "TNGD" must stay as "TNGD", not "TNG D")
    - Change capitalization (e.g., "TNG eWallet" must stay as "TNG eWallet")
-   Examples: "TNG eWallet", "TNG Digital Sdn. Bhd. (TNGD)", "Touch 'n Go Card" - copy these EXACTLY.5. Present the information clearly and comprehensively. If the context lists multiple points, benefits, or features, include ALL of them. Use 2–4 sentences if needed to cover all key information clearly.
+   Examples: "TNG eWallet", "TNG Digital Sdn. Bhd. (TNGD)", "Touch 'n Go Card" - copy these EXACTLY.
+
+   ===== ABSOLUTE EXAMPLES TO FOLLOW =====
+   Correct:
+   User: "What is TNG Digital?"
+   Assistant: "TNG Digital is ..."
+
+   Incorrect:
+   User: "What is TNG Digital?"
+   Assistant: "T Nagara Digital is ..."
+
+   YOU MUST ALWAYS FOLLOW THE CORRECT PATTERN.
+   Never generate alternative expansions, reinterpretations, or invented full forms for ANY name.
+
+5. Present the information clearly and comprehensively. If the context lists multiple points, benefits, or features, include ALL of them. Use 2–4 sentences if needed to cover all key information clearly.
 6. Maintain a formal, polite, and professional tone. Use clear, grammatically correct English with proper punctuation.
 7. Do NOT use emojis, slang, hashtags, or overly casual language.
 8. If the context does not fully answer the question, say in one sentence:
