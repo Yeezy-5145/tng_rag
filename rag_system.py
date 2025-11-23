@@ -200,7 +200,20 @@ class RAGSystem:
                 )
                 
                 # Extract response text
-                response_text = response.choices[0].message.content.strip()
+                choice = response.choices[0]
+                response_text = choice.message.content.strip()
+                
+                # Check if response was cut off due to token limit
+                if choice.finish_reason == "length":
+                    # Response was truncated - try to complete the sentence
+                    # Remove incomplete sentence at the end if it doesn't end with punctuation
+                    if response_text and not response_text[-1] in '.!?':
+                        # Find the last complete sentence
+                        sentences = re.split(r'([.!?]\s+)', response_text)
+                        if len(sentences) > 1:
+                            # Keep all but the last incomplete sentence
+                            response_text = ''.join(sentences[:-1]).strip()
+                
                 return response_text
             except Exception as e:
                 print(f"⚠ Warning: Groq API call failed: {e}")
@@ -904,8 +917,8 @@ Your Answer (2–4 clear sentences covering all key points from the context, usi
         try:
             response = self._call_llm(
                 persona_prompt,
-                # Small max_new_tokens to keep answers short and focused
-                max_new_tokens=80,
+                # Increased max_new_tokens to allow complete sentences (2-4 sentences need ~200-400 tokens)
+                max_new_tokens=300,
                 temperature=0.0,  # Zero temperature for maximum factual accuracy, no hallucination
                 do_sample=False,  # Deterministic output for consistency
             )
