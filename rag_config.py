@@ -15,9 +15,7 @@ class RAGConfig:
     chunk_overlap: int = 100
     top_k: int = 3
     similarity_threshold: float = 0.0
-    llm_model: str = "meta-llama/Meta-Llama-3.1-8B-Instruct"
     vector_db_path: str = os.path.join(BASE_DIR, "chroma_db")
     faq_json_path: str = os.path.join(BASE_DIR, "data", "tngd_faqs.json")
     use_reranker: bool = True
-    use_groq: bool = True
     groq_api_key: Optional[str] = None

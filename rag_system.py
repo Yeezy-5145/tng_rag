@@ -13,7 +13,6 @@ import numpy as np
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
-from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
 import torch
 
 from rag_config import RAGConfig
@@ -46,12 +45,9 @@ class RAGSystem:
         self.guardrails = AdversarialGuardrails()
         self._last_best_chunk: Optional[Dict] = None  # Track last chunk used for answer
 
-        # Determine device (GPU if available, else CPU)
+        # Determine device for embedding model (GPU if available, else CPU)
+        # Note: LLM uses Groq API, so no GPU needed for LLM
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {self.device}")
-        if self.device == "cuda":
-            print(f"GPU: {torch.cuda.get_device_name(0)}")
-            print(f"CUDA Version: {torch.version.cuda}")
 
         # Initialize embedding model
         print("Loading embedding model...")
@@ -59,7 +55,6 @@ class RAGSystem:
         # Move embedding model to GPU if available
         if self.device == "cuda":
             self.embedding_model = self.embedding_model.to(self.device)
-            print("Embedding model moved to GPU")
 
         # Initialize vector store
         print("Initializing vector store...")
@@ -68,110 +63,37 @@ class RAGSystem:
         )
         self.collection = None
 
-        # Initialize LLM
-        self.llm = None
-        self.tokenizer = None
-        self.device_map = None  # Track if using device_map="auto"
+        # Initialize LLM via Groq API
         self.groq_client = None
-        self.use_groq = config.use_groq
+        self.groq_model = None
         self._init_llm()
 
     def _init_llm(self):
-        """Initialize LLM for generation"""
-        if self.use_groq:
-            print("Initializing Groq API client...")
-            try:
-                from groq import Groq
-                
-                # Get API key from config or env file
-                api_key = self.config.groq_api_key
-                if not api_key:
-                    env_vars = _load_env_file()
-                    api_key = env_vars.get('GROQ_API')
-                
-                if not api_key:
-                    raise ValueError("Groq API key not found. Please set it in the 'env' file as GROQ_API=your_key or pass it via config.groq_api_key")
-                
-                self.groq_client = Groq(api_key=api_key)
-                print("✓ Groq API client initialized successfully")
-                self.groq_model = "llama-3.1-8b-instant"                
-                print(f"✓ Using Groq model: {self.groq_model}")
-            except ImportError:
-                raise ImportError("groq package not installed. Install it with: pip install groq")
-            except Exception as e:
-                print(f"✗ ERROR: Failed to initialize Groq client: {e}")
-                import traceback
-                traceback.print_exc()
-                raise
-        else:
-            print("Loading LLM model (this may take a while)...")
-            try:
-                # Try to load with fast tokenizer first, fall back to slow if sentencepiece not available
-                try:
-                    self.tokenizer = AutoTokenizer.from_pretrained(self.config.llm_model)
-                except ValueError as e:
-                    if "sentencepiece" in str(e).lower():
-                        print("⚠ Warning: Fast tokenizer requires sentencepiece. Using slow tokenizer instead.")
-                        print("   Install sentencepiece with: pip install sentencepiece")
-                        self.tokenizer = AutoTokenizer.from_pretrained(self.config.llm_model, use_fast=False)
-                    else:
-                        raise
-                
-                # Set pad token if not present (required for some models)
-                if self.tokenizer.pad_token is None:
-                    self.tokenizer.pad_token = self.tokenizer.eos_token
-                
-                # Configure model loading for GPU
-                if self.device == "cuda":
-                    try:
-                        self.llm = AutoModelForCausalLM.from_pretrained(
-                            self.config.llm_model,
-                            dtype=torch.float16,  # Use float16 for GPU to save memory (fixed deprecation)
-                            device_map="auto",  # Automatically distribute across GPUs
-                        )
-                        self.device_map = "auto"  # Track that we're using device_map
-                        print("✓ LLM model loaded on GPU")
-                    except Exception as e:
-                        print(f"⚠ Warning: Failed to load LLM on GPU: {e}")
-                        print("Falling back to CPU...")
-                        self.llm = AutoModelForCausalLM.from_pretrained(
-                            self.config.llm_model,
-                            dtype=torch.float32,
-                            device_map=None,
-                        )
-                        self.device_map = None
-                        self.llm = self.llm.to("cpu")
-                        self.device = "cpu"  # Update device to reflect actual usage
-                        print("✓ LLM model loaded on CPU (fallback)")
-                else:
-                    self.llm = AutoModelForCausalLM.from_pretrained(
-                        self.config.llm_model,
-                        dtype=torch.float32,
-                        device_map=None,
-                    )
-                    self.device_map = None  # Not using device_map
-                    # Explicitly move to CPU if not using device_map
-                    self.llm = self.llm.to(self.device)
-                    print("✓ LLM model loaded on CPU")
-                
-                # Verify model is loaded
-                if self.llm is None:
-                    raise RuntimeError("LLM model failed to initialize")
-                
-                # Check which device the model is actually on
-                if hasattr(self.llm, 'device'):
-                    actual_device = next(self.llm.parameters()).device
-                    print(f"✓ LLM model verified on device: {actual_device}")
-                elif self.device_map == "auto":
-                    print("✓ LLM model using device_map='auto' (distributed across available devices)")
-                
-                print("✓ LLM model loaded successfully")
-            except Exception as e:
-                print(f"✗ ERROR: Failed to load LLM model: {e}")
-                print(f"Error type: {type(e).__name__}")
-                import traceback
-                traceback.print_exc()
-                raise
+        """Initialize Groq API client"""
+        print("Initializing Groq API client...")
+        try:
+            from groq import Groq
+            
+            # Get API key from config or env file
+            api_key = self.config.groq_api_key
+            if not api_key:
+                env_vars = _load_env_file()
+                api_key = env_vars.get('GROQ_API')
+            
+            if not api_key:
+                raise ValueError("Groq API key not found. Please set it in the 'env' file as GROQ_API=your_key or pass it via config.groq_api_key")
+            
+            self.groq_client = Groq(api_key=api_key)
+            print("✓ Groq API client initialized successfully")
+            self.groq_model = "llama-3.1-8b-instant"                
+            print(f"✓ Using Groq model: {self.groq_model}")
+        except ImportError:
+            raise ImportError("groq package not installed. Install it with: pip install groq")
+        except Exception as e:
+            print(f"✗ ERROR: Failed to initialize Groq client: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     def _call_llm(
         self,
@@ -181,105 +103,40 @@ class RAGSystem:
         do_sample: bool = True,
     ) -> str:
         """
-        Central helper for all LLM generation calls.
-        Ensures consistent tokenization, truncation, and decoding.
+        Central helper for all LLM generation calls using Groq API.
         """
-        if self.use_groq and self.groq_client:
-            # Use Groq API
-            try:
-                # Format as chat messages for Groq API
-                messages = [{"role": "user", "content": prompt}]
-                
-                # Call Groq API
-                response = self.groq_client.chat.completions.create(
-                    model=self.groq_model,
-                    messages=messages,
-                    temperature=temperature if do_sample else 0.0,
-                    max_tokens=max_new_tokens,
-                    top_p=0.95 if do_sample else 1.0,
-                )
-                
-                # Extract response text
-                choice = response.choices[0]
-                response_text = choice.message.content.strip()
-                
-                # Check if response was cut off due to token limit
-                if choice.finish_reason == "length":
-                    # Response was truncated - try to complete the sentence
-                    # Remove incomplete sentence at the end if it doesn't end with punctuation
-                    if response_text and not response_text[-1] in '.!?':
-                        # Find the last complete sentence
-                        sentences = re.split(r'([.!?]\s+)', response_text)
-                        if len(sentences) > 1:
-                            # Keep all but the last incomplete sentence
-                            response_text = ''.join(sentences[:-1]).strip()
-                
-                return response_text
-            except Exception as e:
-                print(f"⚠ Warning: Groq API call failed: {e}")
-                raise
-        
-        # Use local model (original implementation)
-        # Check if tokenizer has a chat template (for instruction-tuned models like LLaMA 3.1)
-        # If it does, format the prompt using the chat template
-        if hasattr(self.tokenizer, 'apply_chat_template') and self.tokenizer.chat_template is not None:
-            # Format as a single user message for instruction following
+        try:
+            # Format as chat messages for Groq API
             messages = [{"role": "user", "content": prompt}]
-            formatted_prompt = self.tokenizer.apply_chat_template(
-                messages, tokenize=False, add_generation_prompt=True
+            
+            # Call Groq API
+            response = self.groq_client.chat.completions.create(
+                model=self.groq_model,
+                messages=messages,
+                temperature=temperature if do_sample else 0.0,
+                max_tokens=max_new_tokens,
+                top_p=0.95 if do_sample else 1.0,
             )
-        else:
-            formatted_prompt = prompt
-        
-        # Tokenize the prompt
-        # Mistral-7B-Instruct supports up to 32k tokens, but we'll use 8192 for safety
-        inputs = self.tokenizer.encode(
-            formatted_prompt, return_tensors="pt", truncation=True, max_length=8192
-        )
-        
-        # Move inputs to the same device as the model
-        # If using device_map="auto", find the device of the model's input layer
-        if self.device_map == "auto" and self.llm is not None:
-            # With device_map="auto", check where the model's first layer is
-            try:
-                model_device = next(self.llm.parameters()).device
-                inputs = inputs.to(model_device)
-            except Exception:
-                # Fallback: move to cuda if available
-                inputs = inputs.to("cuda" if torch.cuda.is_available() else "cpu")
-        elif self.device_map is None:
-            inputs = inputs.to(self.device)
-        else:
-            # Fallback to device setting
-            inputs = inputs.to(self.device)
-
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-
-        input_length = inputs.shape[1]
-
-        with torch.no_grad():
-            outputs = self.llm.generate(
-                inputs,
-                max_length=input_length + max_new_tokens,
-                temperature=temperature,
-                do_sample=do_sample,
-                top_p=0.95,
-                top_k=40,
-                repetition_penalty=1.2,
-                no_repeat_ngram_size=4,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                # Ensure the model can complete sentences naturally
-                min_length=input_length + 10,  # At least generate a few tokens
-            )
-
-        generated_tokens = outputs[0][input_length:]
-        response = self.tokenizer.decode(
-            generated_tokens, skip_special_tokens=True
-        ).strip()
-
-        return response
+            
+            # Extract response text
+            choice = response.choices[0]
+            response_text = choice.message.content.strip()
+            
+            # Check if response was cut off due to token limit
+            if choice.finish_reason == "length":
+                # Response was truncated - try to complete the sentence
+                # Remove incomplete sentence at the end if it doesn't end with punctuation
+                if response_text and not response_text[-1] in '.!?':
+                    # Find the last complete sentence
+                    sentences = re.split(r'([.!?]\s+)', response_text)
+                    if len(sentences) > 1:
+                        # Keep all but the last incomplete sentence
+                        response_text = ''.join(sentences[:-1]).strip()
+            
+            return response_text
+        except Exception as e:
+            print(f"⚠ Warning: Groq API call failed: {e}")
+            raise
 
     def build_knowledge_base(self, faqs: List[Dict]):
         """Build knowledge base from FAQs"""
