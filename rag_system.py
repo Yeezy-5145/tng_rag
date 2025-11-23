@@ -365,14 +365,29 @@ class RAGSystem:
 
             question_text = (meta.get("question") or "").strip()
             question_lower = question_text.lower()
+            
+            # Debug: log distance for very short queries to understand why similarity might be 0
+            if debug and len(query.strip()) < 10:
+                print(f"[DEBUG] Chunk '{question_text[:50]}...' - distance={distance}, semantic_sim={semantic_similarity:.3f}")
 
             # Lightweight lexical bonus so exact/near-exact question titles win
             lexical_bonus = 0.0
             if question_lower:
-                if question_lower == query_lower:
+                query_lower_clean = query_lower.strip("?.,!;:")
+                if question_lower == query_lower_clean:
                     lexical_bonus = 0.5
-                elif question_lower in query_lower or query_lower in question_lower:
+                elif question_lower in query_lower_clean or query_lower_clean in question_lower:
                     lexical_bonus = 0.3
+                else:
+                    # Check for word overlap - if query words appear in question, give bonus
+                    query_words = set(word.strip("?.,!;:") for word in query_lower_clean.split() if len(word.strip("?.,!;:")) > 2)
+                    question_words = set(word.strip("?.,!;:") for word in question_lower.split() if len(word.strip("?.,!;:")) > 2)
+                    if query_words and question_words:
+                        overlap = query_words.intersection(question_words)
+                        if overlap:
+                            # Calculate overlap ratio and give proportional bonus
+                            overlap_ratio = len(overlap) / len(query_words)
+                            lexical_bonus = 0.2 * overlap_ratio  # Up to 0.2 bonus for word overlap
 
             # Use full document text (from ChromaDB) as primary source
             # answer_text in metadata is just for fallback and should now be full length
@@ -488,6 +503,18 @@ class RAGSystem:
             overlap_ratio = overlap / len(query_words)
             score_boost += overlap_ratio * 0.2
         
+        # Strong boost for very close question matches (e.g., "find out more" matches "Where can I find out more")
+        # Check if the query is a subset or very similar to the question
+        if len(query_words) > 3:  # Only for queries with multiple words
+            # Check if most query words appear in the question
+            matching_words = sum(1 for word in query_words if word in question)
+            match_ratio = matching_words / len(query_words) if query_words else 0
+            if match_ratio >= 0.7:  # 70% or more words match
+                score_boost += 0.4  # Strong boost for close question matches
+                # Extra boost if the question contains key phrases from query
+                if "find out" in query_lower and "find out" in question:
+                    score_boost += 0.3  # Additional boost for exact phrase match
+        
         # Boost chunks that contain definition-like language
         if intent["type"] == "definition":
             definition_indicators = ["is an", "is a", "provides", "offers", "service", "application"]
@@ -498,21 +525,45 @@ class RAGSystem:
 
     def _rerank_by_intent(self, docs: List[Dict], query: str) -> List[Dict]:
         """
-        Re-rank documents by intent relevance, not just similarity.
-        This helps prioritize chunks that actually answer the question.
+        Re-rank documents using a weighted combination of similarity and intent relevance.
+        This helps prioritize chunks that actually answer the question while maintaining
+        the importance of semantic similarity.
         """
         intent = self._detect_question_intent(query)
+        
+        # Weight configuration: similarity weight + intent weight = 1.0
+        # Higher similarity weight = more trust in embedding similarity
+        # Higher intent weight = more trust in intent matching
+        similarity_weight = 0.6  # 60% weight on semantic similarity
+        intent_weight = 0.4      # 40% weight on intent matching
         
         # Score each document
         for doc in docs:
             base_similarity = doc.get("similarity", 0.0)
             intent_boost = self._score_chunk_by_intent(doc, intent, query)
-            # Create a combined score: similarity + intent boost
-            doc["intent_score"] = base_similarity + intent_boost
-            doc["intent_boost"] = intent_boost  # Store for debugging
+            
+            # Store individual scores for debugging
+            doc["intent_boost"] = intent_boost
+            
+            # Normalize intent_boost to 0-1 range for fair combination
+            # intent_boost is clamped to [-0.5, 0.8], so we normalize it
+            # Shift to [0, 1.3] then normalize to [0, 1]
+            normalized_intent_boost = (intent_boost + 0.5) / 1.3  # Maps [-0.5, 0.8] to [0, 1]
+            normalized_intent_boost = max(0.0, min(1.0, normalized_intent_boost))  # Clamp to [0, 1]
+            
+            # Calculate weighted combination score
+            # similarity is already in [0, 1] range
+            weighted_score = (similarity_weight * base_similarity) + (intent_weight * normalized_intent_boost)
+            
+            doc["intent_score"] = base_similarity + intent_boost  # Keep for backward compatibility
+            doc["weighted_score"] = weighted_score  # New combined score
         
-        # Sort by intent_score (similarity + intent boost)
-        reranked = sorted(docs, key=lambda d: d.get("intent_score", d.get("similarity", 0.0)), reverse=True)
+        # Sort by weighted_score (weighted combination of similarity and intent)
+        reranked = sorted(
+            docs, 
+            key=lambda d: d.get("weighted_score", d.get("intent_score", d.get("similarity", 0.0))), 
+            reverse=True
+        )
         
         return reranked
 
@@ -550,6 +601,12 @@ User's Question: {query}
 
 Available Chunks:
 {chr(10).join(chunk_descriptions)}
+
+IMPORTANT CRITERIA:
+1. If a chunk's question closely matches the user's question (even if rephrased), prioritize it
+2. If the user asks "where to find" or "how to find out more", prioritize chunks that provide sources/links
+3. If the user asks "what is", prioritize definition chunks
+4. Choose the chunk that most directly addresses what the user is asking for
 
 Which chunk number ({chunk_numbers}) most directly and completely answers the user's question?
 Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
@@ -604,10 +661,9 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
         query_lower = query.lower()
         intent = self._detect_question_intent(query)
         
-        # Boilerplate patterns to exclude
+        # Boilerplate patterns to exclude (but keep Product Disclosure Sheet references)
         boilerplate_patterns = [
             r"Below are related articles.*",
-            r"For more information.*Product Disclosure Sheet.*",
             r"Below are related articles that might be useful.*",
         ]
         
@@ -618,17 +674,28 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
             if not text or len(text) < 10:
                 continue
             
+            # Check similarity and keyword matches BEFORE cleaning boilerplate
+            # This way we know if the chunk is relevant before deciding to filter it
+            similarity = doc.get("similarity", 0.0)
+            has_keyword_match = any(
+                len(word) > 3 and word in text.lower() 
+                for word in query_lower.split()
+            )
+            is_relevant = similarity >= 0.3 or has_keyword_match
+            
             # Clean boilerplate from text instead of filtering the whole chunk
             # This preserves useful content that comes before boilerplate
             original_text = text
             for pattern in boilerplate_patterns:
                 text = re.sub(pattern, "", text, flags=re.IGNORECASE | re.DOTALL)
             
-            # Only skip if the text is now too short after cleaning (mostly boilerplate)
             text_cleaned = text.strip()
-            if len(text_cleaned) < 20:
+            
+            # Only filter out chunks that are mostly boilerplate IF they're also not relevant
+            # If a chunk is relevant (good similarity or keyword match), keep it even if it has some boilerplate
+            if len(text_cleaned) < 20 and not is_relevant:
                 # Debug: show which chunk was filtered due to boilerplate
-                print(f"[DEBUG] Filtered chunk '{question[:60]}...' - mostly boilerplate")
+                print(f"[DEBUG] Filtered chunk '{question[:60]}...' - mostly boilerplate and not relevant")
                 continue
             
             # Update the doc with cleaned text
@@ -648,10 +715,9 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
                     continue
             
             # Keep chunks with reasonable similarity or that match query keywords
-            similarity = doc.get("similarity", 0.0)
             if similarity >= 0.3:  # Only keep reasonably relevant chunks
                 filtered.append(doc)
-            elif any(word in text_cleaned.lower() for word in query_lower.split() if len(word) > 3):
+            elif has_keyword_match:
                 # Keep if it contains query keywords even with lower similarity
                 filtered.append(doc)
             else:
@@ -685,13 +751,47 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
             print(f"[DEBUG] Filtered {len(context_docs)} chunks down to {len(filtered_docs)} after removing boilerplate/irrelevant content")
         
         if not filtered_docs:
-            # If all chunks were filtered, use the top one anyway
-            filtered_docs = sorted(context_docs, key=lambda d: d["similarity"], reverse=True)[:1]
+            # If all chunks were filtered, check if any have reasonable similarity
+            # If the top chunk has similarity 0.0 or very low, don't use it
+            top_chunk = sorted(context_docs, key=lambda d: d["similarity"], reverse=True)[0] if context_docs else None
+            if top_chunk and top_chunk.get("similarity", 0.0) > 0.1:
+                # Only use fallback if similarity is at least 0.1
+                filtered_docs = [top_chunk]
+            else:
+                # All chunks filtered and none have reasonable similarity - return insufficient data
+                return (
+                    "I don't have sufficient relevant information in my knowledge base to answer your question. "
+                    "Please try rephrasing your question with more specific terms related to TNG Digital services."
+                )
 
         # Re-rank by intent (not just similarity) - this prioritizes chunks that actually answer the question
         reranked_docs = self._rerank_by_intent(filtered_docs, query)
         
-        best_chunk = self._llm_rerank_chunks(reranked_docs, query)
+        # Debug: show reranking results
+        if reranked_docs:
+            print(f"[DEBUG] After intent reranking (weighted_score):")
+            for i, doc in enumerate(reranked_docs[:3]):
+                weighted = doc.get("weighted_score", 0.0)
+                similarity = doc.get("similarity", 0.0)
+                intent_boost = doc.get("intent_boost", 0.0)
+                print(f"  {i+1}. weighted={weighted:.3f} (sim={similarity:.3f}, intent_boost={intent_boost:.3f}) | {doc.get('question', '')[:60]}...")
+        
+        # If the top chunk has a significantly higher weighted score (0.1+ difference), 
+        # trust the weighted score and skip LLM reranking to avoid LLM choosing a less relevant chunk
+        if len(reranked_docs) > 1:
+            top_score = reranked_docs[0].get("weighted_score", 0.0)
+            second_score = reranked_docs[1].get("weighted_score", 0.0)
+            score_gap = top_score - second_score
+            
+            if score_gap >= 0.1:  # Top chunk is significantly better
+                print(f"[DEBUG] Top chunk has significant score advantage ({score_gap:.3f}), using it directly (skipping LLM reranking)")
+                best_chunk = reranked_docs[0]
+            else:
+                # Scores are close, use LLM to make the final decision
+                best_chunk = self._llm_rerank_chunks(reranked_docs, query)
+        else:
+            # Only one chunk, use it
+            best_chunk = reranked_docs[0] if reranked_docs else None
         
         if best_chunk:
             # Use only the single best chunk - no choice for the model to make
@@ -700,18 +800,46 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
             # Fallback to top chunk if reranking fails
             selected_docs = reranked_docs[:1]
 
-        # Clean text in the selected doc - remove boilerplate
+        # Check if the best chunk after reranking has sufficient relevance
+        # Check BOTH the original similarity AND the weighted score
         best_chunk = selected_docs[0]
+        original_similarity = best_chunk.get("similarity", 0.0)
+        weighted_score = best_chunk.get("weighted_score", 0.0)
+        intent_score = best_chunk.get("intent_score", original_similarity)
+        
+        # Use the best available score, but also check original similarity
+        final_score = weighted_score if weighted_score > 0 else (intent_score if intent_score > original_similarity else original_similarity)
+        
+        min_similarity_threshold = 0.15  # Lower threshold to account for intent boosts
+        min_original_similarity = 0.1   # Original similarity must be at least this
+        
+        # Also check if the chunk has keyword matches (which indicates relevance even with low similarity)
+        query_lower = query.lower().strip()
+        # Skip keyword matching for queries that are just punctuation or very short
+        is_valid_query = len(query_lower) > 2 and not all(c in ".,!?;: " for c in query_lower)
+        text_lower = best_chunk.get("text", "").lower()
+        question_lower = best_chunk.get("question", "").lower()
+        has_keyword_match = False
+        if is_valid_query:
+            has_keyword_match = any(
+                len(word) > 3 and (word in text_lower or word in question_lower)
+                for word in query_lower.split()
+            )
+        
+        # If original similarity is too low OR (final score is too low AND no keyword matches), return insufficient data
+        if original_similarity < min_original_similarity or (final_score < min_similarity_threshold and not has_keyword_match):
+            return (
+                "I don't have sufficient relevant information in my knowledge base to answer your question. "
+                "Please try rephrasing your question with more specific terms related to TNG Digital services."
+            )
+
+        # Clean text in the selected doc - remove only truly useless boilerplate
+        # Keep Product Disclosure Sheet references as they are useful information
         best_text = best_chunk.get("text", "")
         best_text = re.sub(
             r"Below are related articles.*", "", best_text, flags=re.IGNORECASE | re.DOTALL
         )
-        best_text = re.sub(
-            r"For more information.*Product Disclosure Sheet.*",
-            "",
-            best_text,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
+        # Don't remove Product Disclosure Sheet references - they are useful information
         best_text = re.sub(r"\s+", " ", best_text).strip()
         best_chunk["text"] = best_text
         # Remember last best chunk for external callers (e.g. ask_tngd_bot)
@@ -767,6 +895,8 @@ User's Question: {query}
 Context:
 {best_text}
 
+IMPORTANT: The context may contain both questions and answers. Extract and present ONLY the ANSWER or INFORMATION that responds to the user's question. Do NOT repeat the question from the context. If the context mentions a Product Disclosure Sheet or other resources, include that information in your answer.
+
 Your Answer (2–4 clear sentences covering all key points from the context, using exact information without paraphrasing):
 """
 
@@ -783,9 +913,12 @@ Your Answer (2–4 clear sentences covering all key points from the context, usi
             # Clean up the response
             response = response.strip()
             
-            # Remove any boilerplate that might have been generated
+            # Remove only truly useless boilerplate, but keep Product Disclosure Sheet references
             response = re.sub(r"Below are related articles.*", "", response, flags=re.IGNORECASE | re.DOTALL)
-            response = re.sub(r"For more information.*", "", response, flags=re.IGNORECASE | re.DOTALL)
+            # Don't remove "For more information" if it mentions Product Disclosure Sheet - that's useful
+            # Only remove generic "For more information" that doesn't add value
+            if "product disclosure sheet" not in response.lower():
+                response = re.sub(r"For more information[^,]*\.", "", response, flags=re.IGNORECASE)
             
             # Remove emojis, hashtags, and excessive casual language (hallucination indicators)
             response = re.sub(r"[#@][\w]+", "", response)  # Remove hashtags and @mentions
@@ -828,9 +961,9 @@ Your Answer (2–4 clear sentences covering all key points from the context, usi
             # If hallucination detected, use the original chunk text with minimal cleaning
             if hallucination_detected and selected_docs:
                 response = selected_docs[0]["text"].strip()
-                # Clean the fallback response
+                # Clean the fallback response but keep Product Disclosure Sheet references
                 response = re.sub(r"Below are related articles.*", "", response, flags=re.IGNORECASE | re.DOTALL)
-                response = re.sub(r"For more information.*", "", response, flags=re.IGNORECASE | re.DOTALL)
+                # Don't remove Product Disclosure Sheet references - they are useful information
                 response = re.sub(r"\s+", " ", response).strip()
                 # Truncate to first 4 sentences if too long (to allow comprehensive coverage)
                 sentences = re.split(r"(?<=[.!?])\s+", response)
@@ -913,8 +1046,23 @@ Your Answer (2–4 clear sentences covering all key points from the context, usi
                 "error": False,
             }
 
-        # Generate response
+        # Generate response (similarity check happens inside generate_response after reranking)
         answer = self.generate_response(sanitized_query, retrieved_docs)
+
+        # Check if the response is the insufficient data message
+        insufficient_data_msg = (
+            "I don't have sufficient relevant information in my knowledge base to answer your question. "
+            "Please try rephrasing your question with more specific terms related to TNG Digital services."
+        )
+        is_insufficient_data = insufficient_data_msg.strip() in answer.strip()
+
+        # If insufficient data, return empty sources
+        if is_insufficient_data:
+            return {
+                "answer": answer,
+                "sources": [],
+                "error": False,
+            }
 
         # Ensure answer only uses verified FAQ information
         # Additional validation: check if answer contains suspicious content
@@ -1087,7 +1235,9 @@ def ask_tngd_bot(question: str) -> dict:
     sanitized_query = rag.guardrails.sanitize_input(question)
 
     # Retrieve relevant documents (enable debug for troubleshooting)
-    retrieved_docs = rag.retrieve(sanitized_query, debug=False)
+    # Enable debug for short queries to diagnose similarity issues
+    enable_debug = len(sanitized_query.strip()) < 10
+    retrieved_docs = rag.retrieve(sanitized_query, debug=enable_debug)
 
     if not retrieved_docs:
         return {
@@ -1098,6 +1248,7 @@ def ask_tngd_bot(question: str) -> dict:
         }
 
     # Format retrieved chunks (top 3 from retrieve())
+    # Note: Similarity check happens in generate_response after reranking
     retrieved_chunks = [
         {
             "text": doc["text"],
@@ -1128,10 +1279,20 @@ def ask_tngd_bot(question: str) -> dict:
     # Generate response using persona logic only (retrieval is already done)
     final_answer = rag.generate_response(sanitized_query, retrieved_docs)
 
+    # Check if the response is the insufficient data message
+    insufficient_data_msg = (
+        "I don't have sufficient relevant information in my knowledge base to answer your question. "
+        "Please try rephrasing your question with more specific terms related to TNG Digital services."
+    )
+    is_insufficient_data = insufficient_data_msg.strip() in final_answer.strip()
+
     # Determine the single best chunk actually used for the answer
     best_chunk = getattr(rag, "_last_best_chunk", None)
 
-    if best_chunk:
+    # If insufficient data or no best chunk, return empty sources
+    if is_insufficient_data or best_chunk is None:
+        retrieved_chunks = []
+    elif best_chunk:
         retrieved_chunks = [
             {
                 "text": best_chunk.get("text", ""),
@@ -1142,7 +1303,7 @@ def ask_tngd_bot(question: str) -> dict:
             }
         ]
     else:
-        # Fallback: use the top retrieved doc
+        # Fallback: use the top retrieved doc (only if not insufficient data)
         top_doc = retrieved_docs[0]
         retrieved_chunks = [
             {

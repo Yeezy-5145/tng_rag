@@ -20,3 +20,6 @@ tqdm>=4.65.0
 # Groq API
 groq>=0.4.0
 
+# Web framework
+flask>=2.3.0
+
