@@ -221,23 +221,23 @@ Final Answer + Sources
 │  1. Embed Query: "What is GOrewards?"                           │
 │     → [0.23, -0.45, 0.67, ...] (768-dim vector)                 │
 │                                                                 │
-│  2. Wide Search (8x top_k = 24 chunks)                         │
-│     → ChromaDB cosine similarity                               │
+│  2. Wide Search (8x top_k = 24 chunks)                          │
+│     → ChromaDB cosine similarity                                │
 │                                                                 │
 │  3. Calculate Similarity:                                       │
 │     • Semantic: 1.0 - distance                                  │
-│     • Lexical: Word overlap bonus (0.0-0.5)                    │
+│     • Lexical: Word overlap bonus (0.0-0.5)                     │
 │     • Final: semantic + lexical                                 │
 │                                                                 │
-│  4. Return Top-K (default: 3 chunks)                           │
+│  4. Return Top-K (default: 3 chunks)                            │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                   FILTERING STAGE                               │
 │                                                                 │
-│  • Remove boilerplate ("Below are related articles...")          │
-│  • Filter low similarity (< 0.3) unless keyword match          │
+│  • Remove boilerplate ("Below are related articles...")         │
+│  • Filter low similarity (< 0.3) unless keyword match           │
 │  • Preserve relevant chunks even with some boilerplate          │
 └────────────────────────────┬────────────────────────────────────┘
                              │
@@ -246,55 +246,55 @@ Final Answer + Sources
 │                INTENT-BASED RERANKING                           │
 │                                                                 │
 │  For each chunk:                                                │
-│  1. Detect Intent:                                             │
+│  1. Detect Intent:                                              │
 │     • Definition ("what is X")                                  │
-│     • How-to ("how do I")                                      │
-│     • Feature ("can I", "does it support")                     │
+│     • How-to ("how do I")                                       │
+│     • Feature ("can I", "does it support")                      │
 │                                                                 │
-│  2. Calculate Intent Boost:                                    │
+│  2. Calculate Intent Boost:                                     │
 │     • Question pattern match: +0.5                              │
-│     • Word overlap: +0.2                                       │
-│     • Definition indicators: +0.2                              │
+│     • Word overlap: +0.2                                        │
+│     • Definition indicators: +0.2                               │
 │                                                                 │
-│  3. Weighted Score:                                            │
-│     weighted_score = 0.6 × similarity + 0.4 × intent_boost    │
+│  3. Weighted Score:                                             │
+│     weighted_score = 0.6 × similarity + 0.4 × intent_boost      │
 │                                                                 │
-│  4. Sort by weighted_score                                     │
+│  4. Sort by weighted_score                                      │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                   LLM RERANKING (Optional)                      │
 │                                                                 │
-│  If top chunk score gap < 0.1:                                 │
-│  • Send top 3 chunks to LLM                                    │
-│  • LLM selects best matching chunk                             │
-│  • Prevents LLM from overriding clearly better chunks          │
+│  If top chunk score gap < 0.1:                                  │
+│  • Send top 3 chunks to LLM                                     │
+│  • LLM selects best matching chunk                              │
+│  • Prevents LLM from overriding clearly better chunks           │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    GENERATION STAGE                             │
 │                                                                 │
-│  1. Check Relevance:                                           │
+│  1. Check Relevance:                                            │
 │     • Original similarity ≥ 0.1?                                │
-│     • Weighted score ≥ 0.15 OR keyword match?                  │
-│     • If not → Return "insufficient data"                      │
+│     • Weighted score ≥ 0.15 OR keyword match?                   │
+│     • If not → Return "insufficient data"                       │
 │                                                                 │
-│  2. Build Prompt:                                              │
-│     • Persona: "Professional customer support"                │
-│     • Rules: Use ONLY context, exact names, no hallucination   │
-│     • Context: Best chunk text                                 │
+│  2. Build Prompt:                                               │
+│     • Persona: "Professional customer support"                  │
+│     • Rules: Use ONLY context, exact names, no hallucination    │
+│     • Context: Best chunk text                                  │
 │                                                                 │
-│  3. LLM Generation (Groq API):                                 │
-│     • Model: llama-3.1-8b-instant                              │
+│  3. LLM Generation (Groq API):                                  │
+│     • Model: llama-3.1-8b-instant                               │
 │     • Temperature: 0.0 (deterministic)                          │
 │     • Max tokens: 300                                           │
 │                                                                 │
-│  4. Post-Processing:                                           │
-│     • Remove boilerplate                                       │
-│     • Validate no hallucination                                │
-│     • Ensure proper punctuation                                │
+│  4. Post-Processing:                                            │
+│     • Remove boilerplate                                        │
+│     • Validate no hallucination                                 │
+│     • Ensure proper punctuation                                 │
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
@@ -302,8 +302,8 @@ Final Answer + Sources
 │                      FINAL RESPONSE                             │
 │                                                                 │
 │  {                                                              │
-│    "final_answer": "GOrewards is a loyalty program...",        │
-│    "retrieved_chunks": [{question, url, similarity}],          │
+│    "final_answer": "GOrewards is a loyalty program...",         │
+│    "retrieved_chunks": [{question, url, similarity}],           │
 │    "blocked": false                                             │
 │  }                                                              │
 └─────────────────────────────────────────────────────────────────┘
@@ -545,35 +545,35 @@ The system implements defense-in-depth with multiple guardrail layers:
 ┌─────────────────────────────────────────────────────────┐
 │              GUARDRAIL LAYERS                           │
 ├─────────────────────────────────────────────────────────┤
-│                                                          │
-│  Layer 1: Input Validation                             │
-│  ├─ Length checks (3-1000 chars)                       │
+│                                                         │
+│  Layer 1: Input Validation                              │
+│  ├─ Length checks (3-1000 chars)                        │
 │  ├─ Format validation                                   │
 │  └─ Empty/punctuation-only detection                    │
-│                                                          │
-│  Layer 2: Injection Detection                          │
-│  ├─ Pattern matching (regex)                           │
-│  ├─ Suspicious keyword filtering                       │
-│  └─ System prompt markers                              │
-│                                                          │
+│                                                         │
+│  Layer 2: Injection Detection                           │
+│  ├─ Pattern matching (regex)                            │
+│  ├─ Suspicious keyword filtering                        │
+│  └─ System prompt markers                               │
+│                                                         │
 │  Layer 3: Input Sanitization                            │
-│  ├─ Control character removal                          │
-│  └─ Length truncation                                  │
-│                                                          │
+│  ├─ Control character removal                           │
+│  └─ Length truncation                                   │
+│                                                         │
 │  Layer 4: Retrieval Guardrails                          │
-│  ├─ Similarity threshold enforcement                   │
-│  ├─ Keyword match validation                           │
-│  └─ Empty source handling                              │
-│                                                          │
-│  Layer 5: Generation Guardrails                        │
-│  ├─ Context-bound generation                           │
-│  ├─ Hallucination detection                            │
-│  └─ Response validation                                │
-│                                                          │
-│  Layer 6: Output Validation                            │
-│  ├─ Injection detection in response                   │
-│  └─ Fallback to source text if suspicious              │
-│                                                          │
+│  ├─ Similarity threshold enforcement                    │
+│  ├─ Keyword match validation                            │
+│  └─ Empty source handling                               │
+│                                                         │
+│  Layer 5: Generation Guardrails                         │
+│  ├─ Context-bound generation                            │
+│  ├─ Hallucination detection                             │
+│  └─ Response validation                                 │
+│                                                         │
+│  Layer 6: Output Validation                             │
+│  ├─ Injection detection in response                     │
+│  └─ Fallback to source text if suspicious               │
+│                                                         │
 └─────────────────────────────────────────────────────────┘
 ```
 
