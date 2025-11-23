@@ -103,7 +103,7 @@ for chunk in result["retrieved_chunks"]:
 
 ### Prerequisites
 
-- **Python 3.8+**
+- **Python 3.8+** (tested with **Python 3.12.10**)
 - **8GB+ RAM** (for embedding model)
 - **Groq API Key** (for LLM generation)
 
