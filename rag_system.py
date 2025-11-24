@@ -20,8 +20,8 @@ from rag_chunker import DocumentChunker
 from rag_guardrails import AdversarialGuardrails
 
 
-def _load_env_file(env_path: str = "env") -> Dict[str, str]:
-    """Load environment variables from env file"""
+def _load_env_file(env_path: str = ".env") -> Dict[str, str]:
+    """Load environment variables from .env file"""
     env_vars = {}
     if os.path.exists(env_path):
         with open(env_path, 'r') as f:
@@ -1234,7 +1234,7 @@ def ask_tngd_bot(question: str) -> dict:
     # Sanitize input
     sanitized_query = rag.guardrails.sanitize_input(question)
 
-    # Retrieve relevant documents (enable debug for troubleshooting)
+    # Retrieve relevant documents
     # Enable debug for short queries to diagnose similarity issues
     enable_debug = len(sanitized_query.strip()) < 10
     retrieved_docs = rag.retrieve(sanitized_query, debug=enable_debug)
@@ -1262,7 +1262,6 @@ def ask_tngd_bot(question: str) -> dict:
 
     # Log only top 3 retrieved chunks before synthesis
     try:
-        # Only show top 3 chunks in debug
         top_3_chunks = retrieved_chunks[:3]
         debug_snapshot = {
             "question": question,
@@ -1273,7 +1272,6 @@ def ask_tngd_bot(question: str) -> dict:
         print("\n[DEBUG] RAG state before synthesis (top 3 retrieved chunks):")
         print(json.dumps(debug_snapshot, ensure_ascii=False, indent=2))
     except Exception:
-        # Logging should never break the main flow
         pass
 
     # Generate response using persona logic only (retrieval is already done)
