@@ -176,7 +176,9 @@ for chunk in result["retrieved_chunks"]:
 
 ### System Overview
 
-The RAG system follows a multi-stage pipeline:
+The RAG system follows a multi-stage, context-aware pipeline:
+
+It classifies queries by intent (definition / how-to / feature), re-ranks retrieved chunks using a 60/40 blend of semantic similarity and intent signals, and only invokes the LLM reranker when the top chunks are close in score. Generation is always bound to a single best FAQ chunk with a strict persona prompt that forces it to stay within the provided context and preserve exact product/brand names, and answers are post-validated for hallucination or prompt injection, with either a safe fallback to the original FAQ text or a clear "insufficient data" message when relevance is too low.
 
 ```
 User Query
