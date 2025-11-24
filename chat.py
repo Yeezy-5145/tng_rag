@@ -27,6 +27,9 @@ def main():
     print("Type your questions about TNG Digital (or 'quit' to exit)")
     print("=" * 70)
 
+    # Initialize conversation history
+    conversation_history = []
+
     while True:
         try:
             # Get user input
@@ -41,17 +44,29 @@ def main():
             if not user_input:
                 continue
 
-            # Query the RAG system using the function interface
+            # Query the RAG system using the function interface with conversation history
             print("\n🤖 Assistant: ", end="", flush=True)
-            result = ask_tngd_bot(user_input)
+            result = ask_tngd_bot(user_input, conversation_history=conversation_history)
 
             # Check if blocked
             if result["blocked"]:
                 print(f"⚠️  {result['final_answer']}")
+                # Still add to history even if blocked
+                conversation_history.append({"role": "user", "content": user_input})
+                conversation_history.append({"role": "assistant", "content": result["final_answer"]})
                 continue
 
             # Display answer
-            print(result["final_answer"])
+            answer = result["final_answer"]
+            print(answer)
+
+            # Update conversation history
+            conversation_history.append({"role": "user", "content": user_input})
+            conversation_history.append({"role": "assistant", "content": answer})
+            
+            # Keep only last 10 exchanges (20 messages) to prevent memory bloat
+            if len(conversation_history) > 20:
+                conversation_history = conversation_history[-20:]
 
             # Show sources from retrieved chunks
             if result["retrieved_chunks"]:

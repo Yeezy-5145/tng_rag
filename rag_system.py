@@ -101,13 +101,35 @@ class RAGSystem:
         max_new_tokens: int = 512,
         temperature: float = 0.0,
         do_sample: bool = True,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
     ) -> str:
         """
         Central helper for all LLM generation calls using Groq API.
+        
+        Args:
+            prompt: The current user prompt
+            max_new_tokens: Maximum tokens to generate
+            temperature: Sampling temperature
+            do_sample: Whether to use sampling
+            conversation_history: Optional list of previous messages in format 
+                                [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
         """
         try:
             # Format as chat messages for Groq API
-            messages = [{"role": "user", "content": prompt}]
+            messages = []
+            
+            # Add conversation history if provided
+            if conversation_history:
+                # Ensure conversation_history is a list of dicts with role and content
+                for msg in conversation_history:
+                    if isinstance(msg, dict) and "role" in msg and "content" in msg:
+                        messages.append({
+                            "role": msg["role"],
+                            "content": str(msg["content"])
+                        })
+            
+            # Add current prompt as user message
+            messages.append({"role": "user", "content": prompt})
             
             # Call Groq API
             response = self.groq_client.chat.completions.create(
@@ -312,14 +334,102 @@ class RAGSystem:
         else:
             print(f"Knowledge base already contains {self.collection.count()} chunks")
 
+    def _enhance_query_with_context(self, query: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> str:
+        """
+        Enhance a potentially vague follow-up query with conversation context.
+        For example, "Can you explain more?" -> "Can you explain more about TNG eWallet?"
+        """
+        if not conversation_history or len(conversation_history) == 0:
+            return query
+        
+        # Check if query seems like a follow-up (short, vague, or uses references like "they", "it", "more", etc.)
+        query_lower = query.lower().strip()
+        vague_indicators = [
+            "explain more", "tell me more", "what about", "anything else",
+            "what else", "more about", "how about", "can you explain",
+            "what do", "what does", "what did", "what are", "what is",
+        ]
+        
+        # Check for pronouns that indicate reference to previous conversation
+        pronoun_indicators = ["they", "it", "them", "that", "this", "those", "these"]
+        has_pronouns = any(pronoun in query_lower.split() for pronoun in pronoun_indicators)
+        
+        is_vague = (
+            any(indicator in query_lower for indicator in vague_indicators) 
+            or has_pronouns
+            or len(query.split()) < 4
+        )
+        
+        if not is_vague:
+            return query  # Query seems specific enough, no need to enhance
+        
+        # Extract context from recent conversation (last 4-6 messages)
+        recent_messages = conversation_history[-6:] if len(conversation_history) > 6 else conversation_history
+        
+        # Build context string focusing on key terms and topics discussed
+        # Include both questions and answers to provide full context
+        context_lines = []
+        for msg in recent_messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "").strip()
+            if content:
+                if role == "user":
+                    context_lines.append(f"User: {content}")
+                elif role == "assistant":
+                    context_lines.append(f"Assistant: {content}")
+        
+        if not context_lines:
+            return query
+        
+        context_str = "\n".join(context_lines[-6:])  # Last 6 messages worth of context
+        
+        # Use LLM to enhance the query with context
+        enhancement_prompt = f"""You are helping to rewrite a vague follow-up question to be more specific by incorporating context from a previous conversation.
+
+Previous conversation context:
+{context_str}
+
+Current vague question: {query}
+
+Rewrite the question to be more specific by incorporating relevant information from the previous conversation. 
+- If the user asks "explain more" or "tell me more", expand it to reference what was discussed (e.g., "explain more about TNG eWallet")
+- If the user asks "what about X" or "anything else", keep the intent but make it clearer
+- If the user uses pronouns like "they", "it", "them", replace them with the actual subjects from context
+- If asking "what do they do" after discussing a company, expand to "what does [company name] do"
+- Keep the user's intent intact, just make it more specific and searchable
+
+Respond with ONLY the enhanced question, nothing else. Do not add explanations or extra text:"""
+
+        try:
+            enhanced_query = self._call_llm(
+                enhancement_prompt,
+                max_new_tokens=100,
+                temperature=0.2,  # Low temperature for more consistent rephrasing
+                do_sample=True,
+                conversation_history=None,  # Don't pass history here to avoid recursion
+            ).strip()
+            
+            # Clean up the enhanced query (remove quotes if LLM added them)
+            enhanced_query = enhanced_query.strip('"\'')
+            
+            # Validate enhanced query is reasonable
+            if enhanced_query and len(enhanced_query) > len(query) * 0.5 and len(enhanced_query) < 200:  # Reasonable length
+                return enhanced_query
+            else:
+                return query
+        except Exception as e:
+            print(f"[DEBUG] Query enhancement failed: {e}, using original query")
+            return query
+
     def retrieve(
-        self, query: str, top_k: int = None, debug: bool = False
+        self, query: str, top_k: int = None, debug: bool = False, conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> List[Dict]:
         """
         Retrieve top-K most relevant documents using:
-        1. Embedding similarity search (broad recall)
-        2. Optional LLM reranking (precision)
-        3. Deduplication + diversity filtering
+        1. Query enhancement with conversation context (for vague follow-ups)
+        2. Embedding similarity search (broad recall)
+        3. Optional LLM reranking (precision)
+        4. Deduplication + diversity filtering
         """
 
         if top_k is None:
@@ -331,14 +441,19 @@ class RAGSystem:
                 print("DEBUG: Collection empty.")
             return []
 
+        # 1.5) Enhance query with conversation context if it seems vague
+        enhanced_query = self._enhance_query_with_context(query, conversation_history)
+        if debug and enhanced_query != query:
+            print(f"[DEBUG] Query enhanced: '{query}' -> '{enhanced_query}'")
+
         # 2) Do a wide search to ensure recall (higher than final K)
         wide_k = min(max(top_k * 8, 20), self.collection.count())  # Recall > precision
 
         try:
-            results = self.collection.query(query_texts=[query], n_results=wide_k)
+            results = self.collection.query(query_texts=[enhanced_query], n_results=wide_k)
         except:
             query_embedding = self.embedding_model.encode(
-                [query], convert_to_numpy=True
+                [enhanced_query], convert_to_numpy=True
             ).tolist()
             results = self.collection.query(
                 query_embeddings=query_embedding, n_results=wide_k
@@ -346,7 +461,7 @@ class RAGSystem:
 
         # 3) Convert raw Chroma result format → internal objects
         docs: List[Dict] = []
-        query_lower = query.lower()
+        query_lower = enhanced_query.lower()  # Use enhanced query for similarity calculations
         for i, text in enumerate(results["documents"][0]):
             meta = results["metadatas"][0][i]
 
@@ -726,7 +841,7 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
         
         return filtered
 
-    def generate_response(self, query: str, context_docs: List[Dict]) -> str:
+    def generate_response(self, query: str, context_docs: List[Dict], conversation_history: Optional[List[Dict[str, str]]] = None) -> str:
         """
         Generate a synthesized, paraphrased response using multiple retrieved chunks.
         STRICTLY uses only information from retrieved chunks - no hallucination allowed.
@@ -857,9 +972,24 @@ Respond with ONLY the number ({chunk_numbers}). Do not include any other text.
             pass
 
 # Persona prompt: single-chunk, strictly context-bound, formal tone
+        # Build conversation context string if history is provided
+        conversation_context = ""
+        if conversation_history and len(conversation_history) > 0:
+            conversation_context = "\n\nPREVIOUS CONVERSATION CONTEXT:\n"
+            # Only include recent history (last 3-4 exchanges to avoid token bloat)
+            recent_history = conversation_history[-6:] if len(conversation_history) > 6 else conversation_history
+            for msg in recent_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "user":
+                    conversation_context += f"User asked: {content}\n"
+                elif role == "assistant":
+                    conversation_context += f"Assistant answered: {content}\n"
+            conversation_context += "\nNOTE: Use the previous conversation to understand follow-up questions and provide contextually relevant answers, but base your response ONLY on the retrieved context below.\n"
+        
         persona_prompt = f"""
         You are a professional customer support representative for TNG Digital. Provide an accurate, factual response based ONLY on the information in the context below.
-
+{conversation_context}
 CRITICAL RULES (FOLLOW EXACTLY):
 1. Use ONLY information explicitly stated in the context. Do NOT add, invent, assume, or speculate.
 2. Do NOT paraphrase, rewrite, or reword the context. Extract and present the key information directly.
@@ -908,6 +1038,7 @@ Your Answer (2–4 clear sentences covering all key points from the context, usi
                 max_new_tokens=300,
                 temperature=0.0,  # Zero temperature for maximum factual accuracy, no hallucination
                 do_sample=False,  # Deterministic output for consistency
+                conversation_history=conversation_history,  # Pass conversation history for context
             )
 
             # Clean up the response
@@ -1019,12 +1150,14 @@ Your Answer (2–4 clear sentences covering all key points from the context, usi
 
         return response
 
-    def query(self, user_query: str) -> Dict:
+    def query(self, user_query: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> Dict:
         """
         Main query interface for the RAG system.
 
         Args:
             user_query: User's question
+            conversation_history: Optional list of previous messages in format 
+                                [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
 
         Returns:
             Dictionary with answer, sources, and metadata
@@ -1036,8 +1169,8 @@ Your Answer (2–4 clear sentences covering all key points from the context, usi
 
         sanitized_query = self.guardrails.sanitize_input(user_query)
 
-        # Retrieve relevant documents
-        retrieved_docs = self.retrieve(sanitized_query, debug=False)
+        # Retrieve relevant documents (pass conversation history for query enhancement)
+        retrieved_docs = self.retrieve(sanitized_query, debug=False, conversation_history=conversation_history)
 
         if not retrieved_docs:
             return {
@@ -1047,7 +1180,7 @@ Your Answer (2–4 clear sentences covering all key points from the context, usi
             }
 
         # Generate response (similarity check happens inside generate_response after reranking)
-        answer = self.generate_response(sanitized_query, retrieved_docs)
+        answer = self.generate_response(sanitized_query, retrieved_docs, conversation_history=conversation_history)
 
         # Check if the response is the insufficient data message
         insufficient_data_msg = (
@@ -1182,12 +1315,14 @@ def initialize_rag_system(config: RAGConfig = None) -> RAGSystem:
 
 
 # Main function interface
-def ask_tngd_bot(question: str) -> dict:
+def ask_tngd_bot(question: str, conversation_history: Optional[List[Dict[str, str]]] = None) -> dict:
     """
     Accepts a question string and returns answer with retrieved context.
 
     Args:
         question: User's question about TNG Digital
+        conversation_history: Optional list of previous messages in format 
+                            [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
 
     Returns:
         dict: {
@@ -1237,7 +1372,7 @@ def ask_tngd_bot(question: str) -> dict:
     # Retrieve relevant documents
     # Enable debug for short queries to diagnose similarity issues
     enable_debug = len(sanitized_query.strip()) < 10
-    retrieved_docs = rag.retrieve(sanitized_query, debug=enable_debug)
+    retrieved_docs = rag.retrieve(sanitized_query, debug=enable_debug, conversation_history=conversation_history)
 
     if not retrieved_docs:
         return {
@@ -1275,7 +1410,7 @@ def ask_tngd_bot(question: str) -> dict:
         pass
 
     # Generate response using persona logic only (retrieval is already done)
-    final_answer = rag.generate_response(sanitized_query, retrieved_docs)
+    final_answer = rag.generate_response(sanitized_query, retrieved_docs, conversation_history=conversation_history)
 
     # Check if the response is the insufficient data message
     insufficient_data_msg = (
